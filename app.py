@@ -50,6 +50,7 @@ def call_hf_inference(messages: list[dict]) -> str:
         "messages": messages,
         "max_tokens": 256,
         "temperature": 0.7,
+        "stream": False,
     }
 
     try:
@@ -66,7 +67,10 @@ def call_hf_inference(messages: list[dict]) -> str:
     if not r.ok:
         raise HTTPException(status_code=500, detail=f"HF error: {r.status_code} {r.text}")
 
-    data = r.json()
+    try:
+        data = r.json()
+    except ValueError:
+        raise HTTPException(status_code=500, detail=f"HF returned non-JSON response: {r.text[:500]}")
     try:
         return data["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError):
