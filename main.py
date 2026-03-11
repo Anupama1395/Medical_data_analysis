@@ -1,8 +1,13 @@
+import logging
 import os
 import uuid
 import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -19,6 +24,10 @@ HF_HEADERS = {
 }
 
 # ---- In-memory session storage ----
+# NOTE: This is a simple in-memory storage for demonstration purposes.
+# Sessions are lost on application restart and this approach doesn't scale
+# across multiple server instances. For production use, consider using
+# a persistent storage solution like Redis.
 sessions = {}
 
 SYSTEM_PROMPT = "You are a helpful CS teaching assistant. Give concise explanations."
@@ -65,16 +74,25 @@ def hf_generate(prompt: str) -> str:
         }
     }
 
-    r = requests.post(HF_API_URL, headers=HF_HEADERS, json=payload, timeout=60)
+    try:
+        r = requests.post(HF_API_URL, headers=HF_HEADERS, json=payload, timeout=60)
+    except requests.exceptions.Timeout:
+        logger.error("Timeout while connecting to Hugging Face API")
+        raise HTTPException(status_code=504, detail="Request to language model timed out")
+    except requests.exceptions.ConnectionError as e:
+        logger.error("Connection error to Hugging Face API: %s", str(e))
+        raise HTTPException(status_code=503, detail="Unable to connect to language model service")
 
     # Common HF errors include 401 (bad token), 429 (rate limit), 503 (model loading)
     if r.status_code != 200:
+        logger.error("Hugging Face API returned status %d: %s", r.status_code, r.text)
         raise HTTPException(status_code=r.status_code, detail=r.text)
 
     data = r.json()
 
     # HF can return either list[{"generated_text":...}] or dict with error
     if isinstance(data, dict) and "error" in data:
+        logger.error("Hugging Face API error: %s", data["error"])
         raise HTTPException(status_code=500, detail=data["error"])
 
     if isinstance(data, list) and len(data) > 0 and "generated_text" in data[0]:
@@ -85,7 +103,7 @@ def hf_generate(prompt: str) -> str:
 
 @app.post("/chat")
 def chat(request: ChatRequest):
-    print("Existing sessions:", sessions)
+    logger.debug("Processing chat request for session: %s", request.session_id)
     if request.session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -96,8 +114,9 @@ def chat(request: ChatRequest):
         llm_output = hf_generate(prompt)
     except HTTPException:
         raise
-    except Exception:
-        raise HTTPException(status_code=500, detail="Something went wrong. Please try again later.")
+    except Exception as e:
+        logger.exception("Unexpected error during chat processing: %s", str(e))
+        raise HTTPException(status_code=500, detail="An unexpected error occurred while processing your request.")
 
     sessions[request.session_id].append({"role": "assistant", "content": llm_output})
 
